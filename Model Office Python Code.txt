@@ -1,3 +1,4 @@
+
 import datetime
 import random
 
@@ -5,6 +6,7 @@ import numpy as np
 import pandas as pd
 import math
 import matplotlib.pyplot as plt
+#import lifeActuary as la
 
 class TbaseTable:
     def __init__(self, xlFile):
@@ -83,8 +85,31 @@ class TlifeTable:
         if gender == 0:
             ass = self.asscapm[iage] * (1-fage) + self.asscapm[iage+1] * fage
         else:
-            ass = self.asscapf[iage] * (1-fage) + self.asscapf[iage+1] * fage
+            ass = self.asscapf[iage] * (1 - fage) + self.asscapf[iage + 1] * fage
         return ass
+
+    def setup_jointannuities(self):
+        self.annjoint = np.zeros((102,102), dtype= float)
+        self.annjoint[101] = [0] * len(self.annjoint[0])
+        for row in self.annjoint:
+            row[-1] = 0
+        for m in range(100, -1, -1):
+            for f in range(100, -1, -1):
+                self.annjoint[m, f] = 1 + self.annjoint[m + 1, f + 1] * (self.tpx(1, m, 0)*self.tpx(1,f,1)) / (1 + self.interest)
+
+    def annjoint(self, age_1, age_2, gender):
+        if age_1 or age_2 > 101:
+            return 1
+        iage_1 = int(age_1)
+        iage_2 = int(age_2)
+        fage_1 = age_1 - iage_1
+        fage_2 = age_2 - iage_2
+        if gender == 0:
+            annjoint = (1-fage_1)*(1-fage_1) * self.annjoint[iage_1, iage_2] + fage_1*(1-fage_1)*self.annjoint[iage_1+1,iage_2] + (1-fage_1)*fage_2*self.annjoint[iage_1,iage_2+1] + fage_1*fage_2*self.annjoint[iage_1+1,iage_2+1]
+        else:
+            annjoint = (1-fage_1)*(1-fage_2) * self.annjoint[iage_2, iage_1] + fage_2*(1-fage_1)*self.annjoint[iage_2+1,iage_1] + (1-fage_2)*fage_1*self.annjoint[iage_2,iage_1+1] + fage_1*fage_2*self.annjoint[iage_2+1,iage_1+1]
+        return annjoint
+
 
 class TsuperTable:
     def __init__(self, name, xlFile, interest1, interest2, interestStep):
@@ -99,6 +124,7 @@ class TsuperTable:
             newTable = TlifeTable(self.baseTable, i)
             newTable.setup_annuities()
             newTable.setup_assurances()
+            newTable.setup_jointannuities()
             self.allTables.append(newTable)
     def annuity(self, age, gender, startOffset, endOffset, pre_interest, interest, pthly):
         if interest < self.interest1:
@@ -149,12 +175,49 @@ class TsuperTable:
         ageEnd = age + endOffset
         endAssurance_1 = table1.asscap(ageEnd, gender)
         endAssurance_2 = table2.asscap(ageEnd, gender)
-        startAssurance = startAssurance_1 * (1- ifrac) + startAssurance_2 * ifrac
+        startAssurance = startAssurance_1 * (1 - ifrac) + startAssurance_2 * ifrac
         endAssurance = endAssurance_1 * (1- ifrac) + endAssurance_2 * ifrac
         startDiscount = (1 + interest) ** (-startOffset) * table1.tpx(startOffset, age, gender)
         endDiscount = (1 + interest) ** (-endOffset) * table1.tpx(endOffset, age, gender)
         total_value = startDiscount * startAssurance - endDiscount * endAssurance
         total_value = total_value * (1 + interest) ** (0.5 - deferral)
+        return total_value
+
+    def joint_annuity(self, age_1,age_2, gender, startOffset, endOffset, pre_interest, interest, pthly):
+        if interest < self.interest1:
+            i_index = 0
+        elif interest >= self.interest2 - self.interestStep * 2:
+            fake_interest = self.interest2 - self.interestStep * 2
+            i_index = int((fake_interest - self.interest1) / self.interestStep)
+        else:
+            i_index = int((interest - self.interest1) / self.interestStep)
+        i1 = i_index * self.interestStep + self.interest1
+        i2 = i1 + self.interestStep
+        ifrac = (interest - i1)/(i2 - i1)
+        table1 = self.allTables[i_index]
+        table2 = self.allTables[i_index + 1]
+        ageStart_1 = age_1 + startOffset          #start age for policyholder
+        ageStart_2 = age_2 + startOffset          #start age for Spouse
+        jointlifeAnnuity_1 = table1.annjoint(ageStart_1, ageStart_2, gender)
+        jointlifeAnnuity_2 = table2.annjoint(ageStart_1, ageStart_2, gender)
+        n_payments = (endOffset - startOffset) * pthly
+        n_payments = math.ceil(n_payments)
+        ageEnd_1 = age_1 + startOffset + n_payments/pthly         #End age for policyholder
+        ageEnd_2 = age_2 + startOffset + n_payments / pthly       #End age for spouse
+        new_endOffset_1 = ageEnd_1 - age_1
+        new_endOffset_2 = ageEnd_2 - age_2
+        endjointAnnuity_1 = table1.annjoint(ageEnd_1, ageEnd_2, gender)
+        endjointAnnuity_2 = table2.annjoint(ageEnd_1, ageEnd_2, gender)
+        pthly_adjust = (pthly - 1)/(2 * pthly)
+        jointlifeAnnuity = jointlifeAnnuity_1 * (1 - ifrac) + jointlifeAnnuity_2 * ifrac - pthly_adjust
+        endjointAnnuity = endjointAnnuity_1 * (1 - ifrac) + endjointAnnuity_2 * ifrac - pthly_adjust
+        if gender == 0:
+            startDiscount = table1.tpx(startOffset, age_1, 0) * table1.tpx(startOffset, age_2, 1)
+            endDiscount = (1 + interest) ** (startOffset - new_endOffset_1) * table1.tpx(new_endOffset_1, age_1, 0) * table1.tpx(new_endOffset_2, age_2, 1)
+        else:
+            startDiscount = table1.tpx(startOffset, age_1, 0) * table1.tpx(startOffset, age_2, 1)
+            endDiscount = (1 + interest) ** (startOffset - new_endOffset_1) * table1.tpx(new_endOffset_1, age_1,0) * table1.tpx(new_endOffset_2, age_2, 1)
+        total_value = (1 + pre_interest) ** (-startOffset) * (startDiscount * (jointlifeAnnuity) - endDiscount * (endjointAnnuity))
         return total_value
     def lx(self, x, gender):
         return self.baseTable.lx(x, gender)
@@ -184,28 +247,131 @@ class Tperson:
             iage = int(age1)
         return float("NaN")
 
+    def lapse(self, lapse_first_year, lapse_subsequent_years, basis):    # generate random date of lapse
+        # checks that the policy has started
+        if self.DoI > basis.calcDate and self.DoI < basis.projDate:
+            age = self.DoI - self.DoB
+        elif self.DoI < basis.calcDate and self.DoI < basis.projDate:
+            age = basis.calcDate - self.DoB
+        else:
+            return float("NaN")
+        age1 = age
+        while age1 < age + 1:
+            rnd_lapse = rnd_exp_lapse(lapse_first_year)
+            if rnd_lapse < 1:
+                return rnd_lapse + age + self.DoB
+            age1 = age1 + 1
+        if self.DoI > basis.calcDate and self.DoI < basis.projDate:
+            while age1 >= age + 1 and age1 < basis.projDate - self.DoI + age:
+                rnd_lapse = rnd_exp_lapse(lapse_subsequent_years)
+                if rnd_lapse > 1 and rnd_lapse < basis.projDate - self.DoI:
+                    return rnd_lapse + age + self.DoB
+                age1 = age1 + 1
+            return float("NaN")
+        else:
+            while age1 >= age + 1 and age1 < basis.projDate - basis.calcDate + age:
+                rnd_lapse = rnd_exp_lapse(lapse_subsequent_years)
+                if rnd_lapse > 1 and rnd_lapse < basis.projDate - basis.calcDate:
+                    return rnd_lapse + age + self.DoB
+                age1 = age1 + 1
+            return float("NaN")
+
 
 class Tpolicyholder(Tperson):
     def __init__(self, name, DoB, gender, DoI, pthly):
         Tperson.__init__(self, name, DoB, gender)
         self.DoI = date_in(DoI)
         self.pthly = pthly  #this refers to the premium for assured lives and payment for annuitants
-    def PV(self, economy, superTable, date, DoDeath):
+    def PV(self, economy, superTable, date, DoDeath,DoLapse):
         print("Attempting to calculate PV for abstract class")
         return  0
-    def cashflows(self, economy, lifeTable, DoDeath):
+    def cashflows(self, economy, lifeTable, DoDeath,DoLapse):
         print("Attempting to calculate cashflows for abstract class")
         array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
         cf = np.zeros([array_size])
         return cf
 
 class Tassured(Tpolicyholder):
-    def __init__(self,name, DoB, gender, DoI, SA, premium, pthly, term):
+    def __init__(self,name, DoB, gender, DoI, SA, gteed, premium, pthly, term):
         Tpolicyholder.__init__(self, name, DoB, gender, DoI, pthly)
-        self.SA = SA
         self.term = term
         self.premium = premium
-    def PV_out(self, economy, superTable, date, DoDeath):
+        if np.isnan(gteed):
+            self.gteed = 0
+        else:
+            self.gteed = gteed
+        if np.isnan(SA):
+            self.SA = 0
+        else:
+            self.SA = SA
+
+    def PV_out(self, economy, superTable, date, DoDeath, DoLapse):
+        if afterDeath(date, DoDeath):
+            return 0
+        if afterLapse(date, DoLapse):
+            return 0
+        else:
+            age = date - self.DoB
+            startOffset = max([0, self.DoI - date])
+            if np.isnan(self.term):
+                endOffset = 100
+            else:
+                endOffset = self.DoI - date + self.term
+            if endOffset < 0:
+                return 0
+            interest = economy.interest(date)
+            deferral = 0
+            x_assured = superTable.assurance(age, self.gender, startOffset, endOffset, interest, deferral)  # to compute term assurance for both term and EA
+            x_pure_endowment = superTable.tpx(endOffset, age, self.gender) * (1 + interest) ** (-endOffset)  # to compute Pure Endowment
+            x = x_assured * self.SA + x_pure_endowment * self.gteed
+            return x
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
+            if afterDeath(date, DoDeath):
+                return 0
+            if afterLapse(date, DoLapse):
+                return 0
+            else:
+                age = date - self.DoB
+                startOffset = startDate(date, self.DoI, self.term, self.pthly) - date
+                endOffset = endDate(date, self.DoI, self.term, self.pthly) - date
+                if np.isnan(startOffset) or np.isnan(endOffset):
+                    return 0
+                interest = economy.interest(date)
+                x = superTable.annuity(age, self.gender, startOffset, endOffset, interest, interest, self.pthly)
+                x = x * self.premium * self.pthly
+                return x
+    def PV(self, economy, superTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, superTable, date, DoDeath,DoLapse) - self.PV_out(economy, superTable, date, DoDeath,DoLapse)
+    def cashflows(self, economy, superTable, DoDeath, DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+        array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
+        cf = np.zeros([array_size])
+        premDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        endTermDate = endDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        lastDate = min([minLapse(minDeath(endTermDate, DoDeath),DoLapse), economy.basis.projDate])
+        if np.isnan(premDate) or np.isnan(lastDate):
+            return cf
+        if afterDeath( min(endTermDate, economy.basis.projDate), DoDeath):
+            cf[economy.basis.getIndex(DoDeath)] = -self.SA
+        if afterLapse(min(endTermDate, economy.basis.projDate), DoLapse):
+            cf[economy.basis.getIndex(DoLapse)] = 0
+        while premDate < lastDate:
+            i = economy.basis.getIndex(premDate)
+            cf[i] = cf[i] + self.premium
+            premDate = premDate + 1 / self.pthly
+        return cf
+
+class TEndowment(Tpolicyholder):
+    def __init__(self,name, DoB, gender, DoI, SA, gteed, premium, pthly, term):
+        Tpolicyholder.__init__(self, name, DoB, gender, DoI, pthly)
+        self.term = term
+        self.premium = premium
+        self.gteed = gteed
+        if np.isnan(SA):
+            self.SA = 0
+        else:
+            self.SA = SA
+
+    def PV_out(self, economy, superTable, date, DoDeath, DoLapse):
         if afterDeath(date, DoDeath):
             return 0
         else:
@@ -219,10 +385,11 @@ class Tassured(Tpolicyholder):
                 return 0
             interest = economy.interest(date)
             deferral = 0
-            x = superTable.assurance(age, self.gender, startOffset, endOffset, interest, deferral)
-            x = x * self.SA
+            x_assured = superTable.assurance(age, self.gender, startOffset, endOffset, interest, deferral)  # to compute term assurance for both term and EA
+            x_pure_endowment = superTable.tpx(endOffset, age, self.gender) * (1 + interest) ** (-endOffset)  # to compute Pure Endowment
+            x = x_assured * self.SA + x_pure_endowment * self.gteed
             return x
-    def PV_in(self, economy, superTable, date, DoDeath):
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
             if afterDeath(date, DoDeath):
                 return 0
             else:
@@ -235,9 +402,9 @@ class Tassured(Tpolicyholder):
                 x = superTable.annuity(age, self.gender, startOffset, endOffset, interest, interest, self.pthly)
                 x = x * self.premium * self.pthly
                 return x
-    def PV(self, economy, superTable, date, DoDeath):
-        return self.PV_in(economy, superTable, date, DoDeath) - self.PV_out(economy, superTable, date, DoDeath)
-    def cashflows(self, economy, superTable, DoDeath):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+    def PV(self, economy, superTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, superTable, date, DoDeath,DoLapse) - self.PV_out(economy, superTable, date, DoDeath,DoLapse)
+    def cashflows(self, economy, superTable, DoDeath, DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
         array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
         cf = np.zeros([array_size])
         premDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
@@ -253,7 +420,127 @@ class Tassured(Tpolicyholder):
             premDate = premDate + 1 / self.pthly
         return cf
 
+class TassuredJoint(Tpolicyholder):
+    def __init__(self,name, DoB, gender, DoI, SA, premium, pthly, term, Spouse_DoB):
+        Tpolicyholder.__init__(self, name, DoB, gender, DoI, pthly)
+        self.SA = SA
+        self.term = term
+        self.premium = premium
+        self.Spouse_DoB = date_in(Spouse_DoB)
 
+    def PV_out(self, economy, superTable, date, DoDeath,DoLapse):
+        if afterDeath(date, DoDeath):
+            return 0
+        else:
+            age_ph = date - self.DoB
+            age_spouse = date - self.Spouse_DoB
+            startOffset = max([0, self.DoI - date])
+            if np.isnan(self.term):
+                endOffset = 100
+            else:
+                endOffset = self.DoI - date + self.term
+            if endOffset < 0:
+                return 0
+            interest = economy.interest(date)
+            deferral = 0
+            x_jointassured = superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset, interest,interest,self.pthly) * interest/(1+interest)
+            x = x_jointassured * self.SA
+            return x
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
+            if afterDeath(date, DoDeath):
+                return 0
+            else:
+                age_ph = date - self.DoB
+                age_spouse = date - self.Spouse_DoB
+                startOffset = startDate(date, self.DoI, self.term, self.pthly) - date
+                endOffset = endDate(date, self.DoI, self.term, self.pthly) - date
+                if np.isnan(startOffset) or np.isnan(endOffset):
+                    return 0
+                interest = economy.interest(date)
+                x = 1 - superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset, interest,interest,self.pthly)
+                x = x * self.premium * self.pthly
+                return x
+    def PV(self, economy, superTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, superTable, date, DoDeath,DoLapse) - self.PV_out(economy, superTable, date, DoDeath,DoLapse)
+    def cashflows(self, economy, superTable, DoDeath,DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+        array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
+        cf = np.zeros([array_size])
+        premDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        endTermDate = endDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        lastDate = min([minDeath(endTermDate, DoDeath), economy.basis.projDate])
+        if np.isnan(premDate) or np.isnan(lastDate):
+            return cf
+        if afterDeath( min(endTermDate, economy.basis.projDate), DoDeath):
+            cf[economy.basis.getIndex(DoDeath)] = -self.SA
+        while premDate < lastDate:
+            i = economy.basis.getIndex(premDate)
+            cf[i] = cf[i] + self.premium
+            premDate = premDate + 1 / self.pthly
+        return cf
+
+class TassuredLS(Tpolicyholder):
+    def __init__(self,name, DoB, gender, DoI, SA, premium, pthly, term, Spouse_DoB):
+        Tpolicyholder.__init__(self, name, DoB, gender, DoI, pthly)
+        self.SA = SA
+        self.term = term
+        self.premium = premium
+        self.Spouse_DoB = date_in(Spouse_DoB)
+
+    def PV_out(self, economy, superTable, date, DoDeath,DoLapse):
+        if afterDeath(date, DoDeath):
+            return 0
+        else:
+            age_ph = date - self.DoB
+            age_spouse = date - self.Spouse_DoB
+            startOffset = max([0, self.DoI - date])
+            if np.isnan(self.term):
+                endOffset = 100
+            else:
+                endOffset = self.DoI - date + self.term
+            if endOffset < 0:
+                return 0
+            interest = economy.interest(date)
+            deferral = 0
+            if self.gender ==0:
+                x_LS = superTable.assurance(age_ph, 0, startOffset, endOffset, interest, deferral) + superTable.assurance(age_spouse, 1, startOffset, endOffset, interest, deferral) -(1 - superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset, interest,interest,self.pthly) * interest/(1+interest))
+            else:
+                x_LS = superTable.assurance(age_ph, 1, startOffset, endOffset, interest, deferral) + superTable.assurance(age_spouse, 0, startOffset,endOffset, interest, deferral) - (1 - superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset,interest, interest, self.pthly) * interest / (1 + interest))
+            x = x_LS * self.SA
+            return x
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
+            if afterDeath(date, DoDeath):
+                return 0
+            else:
+                age_ph = date - self.DoB
+                age_spouse = date - self.Spouse_DoB
+                startOffset = startDate(date, self.DoI, self.term, self.pthly) - date
+                endOffset = endDate(date, self.DoI, self.term, self.pthly) - date
+                if np.isnan(startOffset) or np.isnan(endOffset):
+                    return 0
+                interest = economy.interest(date)
+                if self.gender == 0:
+                    x = TsuperTable.annuity(age_ph, self.gender, startOffset, endOffset, interest, interest, self.pthly) + superTable.annuity(age_spouse, 1, startOffset, endOffset, interest, interest, self.pthly) - superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset, interest,interest,self.pthly)
+                else:
+                    x = TsuperTable.annuity(age_ph, self.gender, startOffset, endOffset, interest, interest, self.pthly) + superTable.annuity(age_spouse, 0, startOffset, endOffset, interest, interest, self.pthly) - superTable.joint_annuity(age_ph, age_spouse, self.gender, startOffset, endOffset, interest,interest,self.pthly)
+                x = x * self.premium * self.pthly
+                return x
+    def PV(self, economy, superTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, superTable, date, DoDeath,DoLapse) - self.PV_out(economy, superTable, date, DoDeath,DoLapse)
+    def cashflows(self, economy, superTable, DoDeath,DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+        array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
+        cf = np.zeros([array_size])
+        premDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        endTermDate = endDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        lastDate = min([minDeath(endTermDate, DoDeath), economy.basis.projDate])
+        if np.isnan(premDate) or np.isnan(lastDate):
+            return cf
+        if afterDeath( min(endTermDate, economy.basis.projDate), DoDeath):
+            cf[economy.basis.getIndex(DoDeath)] = -self.SA
+        while premDate < lastDate:
+            i = economy.basis.getIndex(premDate)
+            cf[i] = cf[i] + self.premium
+            premDate = premDate + 1 / self.pthly
+        return cf
 
 class Tannuitant(Tpolicyholder):
     def __init__(self, name, DoB, gender, DoI, first_payment, pthly, term, increases):
@@ -264,10 +551,10 @@ class Tannuitant(Tpolicyholder):
             self.increases = 0
         else:
             self.increases = increases
-    def PV_in(self, economy, superTable, date, DoDeath):
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
         return 0
 
-    def PV_out(self, economy, superTable, date, DoDeath):
+    def PV_out(self, economy, superTable, date, DoDeath,DoLapse):
         if afterDeath(date, DoDeath):
             return 0
         else:
@@ -281,10 +568,10 @@ class Tannuitant(Tpolicyholder):
             x = superTable.annuity(age, self.gender, startOffset, endOffset, interest, net_interest, self.pthly)
             x = x * self.first_payment * paymentIncrement(date + startOffset, self.DoI, self.pthly, self.increases) * self.pthly
             return x
-    def PV(self, economy, lifeTable, date, DoDeath):
-        return self.PV_in(economy, lifeTable, date, DoDeath) - self.PV_out(economy, lifeTable, date, DoDeath)
+    def PV(self, economy, lifeTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, lifeTable, date, DoDeath,DoLapse) - self.PV_out(economy, lifeTable, date, DoDeath,DoLapse)
 
-    def cashflows(self, economy, superTable, DoDeath):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+    def cashflows(self, economy, superTable, DoDeath, DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
         array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
         cf = np.zeros([array_size])
         paymentDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
@@ -299,6 +586,84 @@ class Tannuitant(Tpolicyholder):
             next_payment = next_payment * (1 + self.increases) ** (1/self.pthly)
         return cf
 
+
+class Tjointannuitant(Tpolicyholder):
+    def __init__(self, name, DoB, gender, DoI, first_payment, pthly, term, increases, Spouse_DoB, spouse_prop):
+        Tpolicyholder.__init__(self, name, DoB, gender, DoI, pthly)
+        self.first_payment = first_payment
+        self.term = term
+        self.Spouse_DoB = date_in(Spouse_DoB)
+        self.spouse_prop = spouse_prop
+        if np.isnan(increases):
+            self.increases = 0
+        else:
+            self.increases = increases
+
+    def randomDeathJointannuity(self, lifeTable, basis):
+        age_ph = basis.calcDate - self.DoB
+        age_spouse = basis.calcDate - self.SpouseDoB
+        iage_ph = int(age_ph)
+        iage_spouse = int(age_spouse)
+        age1_ph = age_ph
+        age2_ph = iage_ph + 1
+        age1_spouse = age_spouse
+        age2_spouse = iage_spouse + 1
+        while age1_ph < basis.projDate - basis.calcDate + age_ph and age1_spouse < basis.projDate - basis.calcDate + age_spouse:  #return actual date of death
+            if self.gender == 0:
+                q_age = 1-lifeTable.tpx(1, iage_ph, self.gender) * lifeTable.tpx(1, iage_spouse, 1)  #probability of failure of the joint life status
+            else:
+                q_age = 1-lifeTable.tpx(1, iage_ph, self.gender) * lifeTable.tpx(1, iage_spouse, 0)
+            rnd_death = rnd_exp(q_age)
+            if rnd_death < age2_ph - age1_ph:
+                return rnd_death + age1_ph + self.DoB
+            elif rnd_death < age2_spouse - age1_spouse:
+                return rnd_death + age1_spouse + self.Spouse_DoB
+
+            age1_ph = age2_ph
+            age1_spouse = age2_spouse
+            age2_ph = age2_ph + 1
+            age2_spouse = age2_spouse + 1
+            iage_ph = int(age1_ph)
+            iage_spouse = int(age1_spouse)
+
+        return float("NaN")
+
+
+    def PV_in(self, economy, superTable, date, DoDeath,DoLapse):
+        return 0
+
+    def PV_out(self, economy, superTable, date, DoDeath,DoLapse):
+        if afterDeath(date, DoDeath):
+            return 0
+        else:
+            age_1 = date - self.DoB
+            age_2 = date - self.Spouse_DoB
+            startOffset = startDate(date, self.DoI, self.term, self.pthly) - date
+            endOffset = endDate(date, self.DoI, self.term, self.pthly) - date
+            if np.isnan(startOffset) or np.isnan(endOffset):
+                return 0
+            interest = economy.interest(date)
+            net_interest = interest - self.increases
+            x = superTable.annuity(age_1, self.gender, startOffset, endOffset, interest, net_interest, self.pthly)
+            x = x * self.first_payment * paymentIncrement(date + startOffset, self.DoI, self.pthly, self.increases) * self.pthly
+            return x
+    def PV(self, economy, lifeTable, date, DoDeath,DoLapse):
+        return self.PV_in(economy, lifeTable, date, DoDeath,DoLapse) - self.PV_out(economy, lifeTable, date, DoDeath,DoLapse)
+
+    def cashflows(self, economy, superTable, DoDeath,DoLapse):  #Economy contains a basis which has start, end and pthly. DoDeath is from the deathMatrix
+        array_size = int((economy.basis.projDate + 2 - economy.basis.calcDate) * economy.basis.pthly)
+        cf = np.zeros([array_size])
+        paymentDate = startDate(economy.basis.calcDate, self.DoI, self.term, self.pthly)
+        next_payment = self.first_payment * paymentIncrement(paymentDate, self.DoI, self.pthly, self.increases)
+        lastDate = min([minDeath(endDate(economy.basis.calcDate, self.DoI, self.term, self.pthly), DoDeath), economy.basis.projDate])
+        if not(np.isnan(self.term)):
+            last_date = math.min(lastDate, self.DoI + self.term)
+        while paymentDate < lastDate:
+            i = economy.basis.getIndex(paymentDate)
+            cf[i] = cf[i] + next_payment
+            paymentDate = paymentDate + 1 / self.pthly
+            next_payment = next_payment * (1 + self.increases) ** (1/self.pthly)
+        return cf
 
 class Tbasis():
     def __init__(self, calcDate, projDate, interest, inflation, salary_incs, fwl, equity_mu, equity_sigma, interest_mu, interest_alpha, interest_sigma, inflation_mu, inflation_alpha, inflation_sigma, pthly):
@@ -344,7 +709,7 @@ class Teconomy():
             r3 = np.random.normal(0,1)
             self.zequities[i] = self.zequities[i-1] * (1 + basis.equity_mu/basis.pthly + r1 * basis.equity_sigma/math.sqrt(basis.pthly))
             self.zinterest[i] = self.zinterest[i-1] + basis.interest_alpha * (basis.interest_mu - self.zinterest[i-1]) / basis.pthly + basis.interest_sigma * r2 / math.sqrt(basis.pthly)
-            self.zinflation[i] = self.zinflation[i - 1] + basis.inflation_alpha * (basis.inflation_mu - self.zinflation[i - 1]) / basis.pthly + basis.inflation_sigma * r2 / math.sqrt(basis.pthly)
+            self.zinflation[i] = self.zinflation[i - 1] + basis.inflation_alpha * (basis.inflation_mu - self.zinflation[i - 1]) / basis.pthly + basis.inflation_sigma * r3 / math.sqrt(basis.pthly)
     def equities(self, date):
         zi = (date - self.dates[0]) / (self.dates[1] - self.dates[0])
         i = int(zi)
@@ -438,6 +803,11 @@ def rnd_exp(q):
     t = -math.log(y) / mu
     return t
 
+def rnd_exp_lapse(l):
+    mu = l
+    y = random.random()
+    t = -math.log(y) / mu
+    return t
 def afterDeath(date, DoDeath):  #The (boolean) function is assessing whether the date indicated is b4 or after DoD
     if np.isnan(DoDeath):
         return False
@@ -446,6 +816,14 @@ def afterDeath(date, DoDeath):  #The (boolean) function is assessing whether the
     else:
         return date > DoDeath
 
+def afterLapse(date, DoLapse):  #The (boolean) function is assessing whether the date indicated is b4 or after DoL
+    if np.isnan(DoLapse):
+        return False
+    elif DoLapse == 0:
+        return False
+    else:
+        return date > DoLapse
+
 def minDeath(date, DoDeath):
     if np.isnan(DoDeath):
         return date
@@ -453,6 +831,14 @@ def minDeath(date, DoDeath):
         return date
     else:
         return min([date, DoDeath])
+
+def minLapse(date, DoLapse):
+    if np.isnan(DoLapse):
+        return date
+    elif DoLapse == 0:
+        return date
+    else:
+        return min([date, DoLapse])
 
 def startDate(date, DoI, term, pthly): #this is effectively, when is the next payment
     if np.isnan(term):
@@ -486,13 +872,25 @@ def read_policyholders(csvFile):
     for iph in policyholderData.index:
         ph = policyholderData.loc[iph]
         if ph.loc["policy type"] == "term":
-            new_ph = Tassured(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["premium"], ph.loc["pthly"], ph.loc["term"])
+            new_ph = Tassured(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"],float("NaN") ,ph.loc["premium"], ph.loc["pthly"], ph.loc["term"])
         elif ph.loc["policy type"] == "whole life":
-            new_ph = Tassured(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["premium"], ph.loc["pthly"], float("NaN"))
+            new_ph = Tassured(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], float("NaN"), ph.loc["premium"], ph.loc["pthly"], float("NaN"))
         elif ph.loc["policy type"] == "annuity constant":
             new_ph = Tannuitant(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["first payment"], ph.loc["pthly"], ph.loc["term"], 0)
         elif ph.loc["policy type"] == "annuity fixed":
             new_ph = Tannuitant(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["first payment"], ph.loc["pthly"], ph.loc["term"], ph.loc["increases"])
+        elif ph.loc["policy type"] == "endowment":
+            new_ph = TEndowment(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["gteed amount"] ,ph.loc["premium"], ph.loc["pthly"], ph.loc["term"])
+        elif ph.loc["policy type"] == "endowment assurance":
+            new_ph = TEndowment(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["gteed amount"] ,ph.loc["premium"], ph.loc["pthly"], ph.loc["term"])
+        #elif ph.loc["policy type"] == "annuity fixed + spouse":
+            #new_ph = Tjointannuitant(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["first payment"], ph.loc["pthly"], ph.loc["term"], ph.loc["increases"], ph.loc["Spouse DoB"], ph.loc["Spouse prop"])
+        elif ph.loc["policy type"] == "whole life first death":
+            new_ph = TassuredJoint(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["premium"], ph.loc["pthly"], float("NaN"), ph.loc["Spouse DoB"])
+        elif ph.loc["policy type"] == "whole life second death":
+            new_ph = TassuredLS(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["premium"], ph.loc["pthly"], float("NaN"), ph.loc["Spouse DoB"])
+        elif ph.loc["policy type"] == "term first death":
+            new_ph = TassuredJoint(ph.loc["name"], ph.loc["DoB"], ph.loc["gender"], ph.loc["DoI"], ph.loc["SA"], ph.loc["premium"], ph.loc["pthly"], ph.loc["term"], ph.loc["Spouse DoB"])
         else:
             new_ph = None
         if new_ph != None:
@@ -518,6 +916,17 @@ for i in range(total_MC):
         DoD = ph.randomDeath(UK2019, mainBasis)
         deathMatrix[iph, i] = DoD
 
+lapseMatrix = np.zeros([len(policyholderList), total_MC])
+for i in range(total_MC):
+    economy_run = Teconomy(mainBasis)
+    allEconomies.append(economy_run)
+    for iph in range(len(policyholderList)):
+        ph = policyholderList[iph]
+        DoL = ph.lapse(0.05,0.02, mainBasis)
+        lapseMatrix[iph, i] = DoL
+
+
+
 array_size = int((mainBasis.projDate + 2 - mainBasis.calcDate) * mainBasis.pthly)
 balanceSheet = TbalanceSheet(1000000, 1000000, 4000000, 7, mainBasis.calcDate)
 company = TlifeCompany(balanceSheet, 50000, 800000, policyholderList)
@@ -527,8 +936,8 @@ for isim in range(total_MC):
     for iph in range(len(policyholderList)):
         ph = policyholderList[iph]
         economy = allEconomies[isim]
-        total_liability[isim] = total_liability[isim] + ph.PV(economy, UK2019, mainBasis.projDate, deathMatrix[iph, isim])
-        add_cashflows = ph.cashflows(economy, UK2019, deathMatrix[iph, isim])
+        total_liability[isim] = total_liability[isim] + ph.PV(economy, UK2019, mainBasis.projDate, deathMatrix[iph, isim] ,lapseMatrix[iph, isim])
+        add_cashflows = ph.cashflows(economy, UK2019, deathMatrix[iph, isim], lapseMatrix[iph, isim])
         total_cashflows[isim, : ] = np.add(total_cashflows[isim, :], add_cashflows)
 
 BSMatrix = []
@@ -560,3 +969,82 @@ plt.show()
 
 print(time2 := datetime.datetime.now())
 print(time2 - time1)
+
+
+#     # Initialize cash level
+initial_balance_sheet = BSMatrix[0][0]
+cash_allocation = 0.1
+equities_allocation = 0.3
+bonds_allocation = 0.6
+
+# Obtain the initial values of cash, equities, and bonds
+initial_cash = initial_balance_sheet.cash
+initial_equities = initial_balance_sheet.equities
+initial_bonds = initial_balance_sheet.bonds
+# Calculate the initial portfolio value
+initial_portfolio_value = initial_cash + initial_equities + initial_bonds
+
+cash = 0.10 * initial_portfolio_value
+
+# Define the rebalancing dates and thresholds
+rebalance_dates = [mainBasis.calcDate]  # Initialize with the starting date
+rebalance_month = mainBasis.calcDate.month
+
+from datetime import timedelta
+for i in range(int((mainBasis.projDate - mainBasis.calcDate).days)):
+    current_date = mainBasis.calcDate + timedelta(days=i)
+   
+# Check for end-of-year rebalancing
+if current_date.month == 1 and rebalance_month != 1:
+    rebalance_month = 1
+    rebalance_dates.append(current_date)
+   
+# Check for monthly rebalancing based on cash threshold
+if (current_date.month != rebalance_month) and (cash / initial_portfolio_value < cash_allocation):
+    rebalance_month = current_date.month
+    rebalance_dates.append(current_date)
+
+# Perform the investment strategy for each simulation
+for isim in range(total_MC):
+    balanceSheet = TbalanceSheet(initial_portfolio_value, initial_portfolio_value, 0, 7, mainBasis.calcDate)
+    previousBS = balanceSheet
+   
+economy = allEconomies[isim]
+cashflows = total_cashflows[isim, :]
+
+# Track portfolio composition
+cash = initial_portfolio_value * cash_allocation
+equities = initial_portfolio_value * equities_allocation
+bonds = initial_portfolio_value * bonds_allocation
+
+# Track rebalancing actions
+cash_inflows = 0
+cash_outflows = 0
+
+for index in range(array_size):
+    newBS = company.rollForward(previousBS, economy, cashflows, index)
+    previousBS = newBS
+
+    # Update portfolio composition
+    cash = newBS.cash
+    equities = newBS.equities
+    bonds = newBS.bonds
+
+    # Check if rebalancing is required
+    if mainBasis.calcDate + index / mainBasis.pthly in rebalance_dates:
+        # Calculate the new portfolio values after rebalancing
+        total_value = cash + equities + bonds
+        cash = cash_allocation * total_value
+        equities = equities_allocation * total_value
+        bonds = bonds_allocation * total_value
+
+        # Calculate cash inflows or outflows due to rebalancing
+        cash_inflows += cash - newBS.cash
+        cash_outflows += newBS.cash - cash
+
+# Calculate solvency after all transactions
+solvency = cash + equities + bonds
+
+# Print or store solvency and cash flows for this simulation
+print(f"Simulation {isim + 1} - Solvency: {solvency:.2f}, Cash Inflows: {cash_inflows:.2f}, Cash Outflows: {cash_outflows:.2f}")   
+   
